@@ -41,7 +41,10 @@ except LookupError:
 # =====================================================
 # LOAD CREDIT DATA
 # =====================================================
-df = pd.read_excel("Final data converted from num to cat.xlsx")
+import os
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+df = pd.read_excel(os.path.join(BASE_DIR, "Final data converted from num to cat.xlsx"))
 
 # =====================================================
 # HANDLE MISSING VALUES
@@ -126,7 +129,7 @@ comparison_df = pd.DataFrame(comparison).sort_values("AUC", ascending=False)
 # =====================================================
 # SENTIMENT + WORDCLOUD (FROM TXT)
 # =====================================================
-with open("NPS Survey.txt", "r", encoding="utf-8") as f:
+with open(os.path.join(BASE_DIR, "NPS Survey.txt"), "r", encoding="utf-8") as f:
     reviews = [line.strip() for line in f.readlines() if line.strip()]
 
 sia = SentimentIntensityAnalyzer()
