@@ -1,0 +1,11 @@
+dash
+pandas
+numpy
+plotly
+scikit-learn
+xgboost
+matplotlib
+wordcloud
+nltk
+gunicorn
+openpyxl
