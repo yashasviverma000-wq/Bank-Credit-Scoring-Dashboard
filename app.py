@@ -50,11 +50,14 @@ df = pd.read_excel(os.path.join(BASE_DIR, "Final data converted from num to cat.
 # HANDLE MISSING VALUES
 # =====================================================
 for col in df.columns:
-    if df[col].dtype == "object":
-        df[col] = df[col].fillna(df[col].mode()[0])
-    else:
+    if pd.api.types.is_numeric_dtype(df[col]):
+        df[col] = pd.to_numeric(df[col], errors="coerce")
         df[col] = df[col].fillna(df[col].median())
-
+    else:
+        df[col] = df[col].replace(["nan", "None", ""], np.nan)
+        mode_val = df[col].mode()
+        fill_value = mode_val.iloc[0] if not mode_val.empty else "Unknown"
+        df[col] = df[col].fillna(fill_value)
 # =====================================================
 # TARGET COLUMN
 # =====================================================
