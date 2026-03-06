@@ -1,5 +1,9 @@
-import pandas as pd
+import os
+import base64
+from io import BytesIO
+
 import numpy as np
+import pandas as pd
 
 import dash
 from dash import dcc, html, Input, Output, dash_table
@@ -16,66 +20,99 @@ from sklearn.tree import DecisionTreeClassifier
 from sklearn.ensemble import RandomForestClassifier
 from xgboost import XGBClassifier
 
-# --- avoid tkinter backend issues
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from wordcloud import WordCloud
-from io import BytesIO
-import base64
 
 import nltk
 from nltk.sentiment import SentimentIntensityAnalyzer
 
 
 # =====================================================
-# NLTK (download only if missing)
+# BASE DIRECTORY
+# =====================================================
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# =====================================================
+# NLTK DOWNLOAD ONLY IF MISSING
 # =====================================================
 try:
     nltk.data.find("sentiment/vader_lexicon.zip")
 except LookupError:
     nltk.download("vader_lexicon")
 
-
 # =====================================================
 # LOAD CREDIT DATA
 # =====================================================
-import os
+excel_path = os.path.join(BASE_DIR, "Final data converted from num to cat.xlsx")
+txt_path = os.path.join(BASE_DIR, "NPS Survey.txt")
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-df = pd.read_excel(os.path.join(BASE_DIR, "Final data converted from num to cat.xlsx"))
+df = pd.read_excel(excel_path, engine="openpyxl")
 
-# =====================================================
-# HANDLE MISSING VALUES
-# =====================================================
-for col in df.columns:
-    if pd.api.types.is_numeric_dtype(df[col]):
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-        df[col] = df[col].fillna(df[col].median())
-    else:
-        df[col] = df[col].replace(["nan", "None", ""], np.nan)
-        mode_val = df[col].mode()
-        fill_value = mode_val.iloc[0] if not mode_val.empty else "Unknown"
-        df[col] = df[col].fillna(fill_value)
+# standardize column names
+df.columns = df.columns.str.strip()
+
 # =====================================================
 # TARGET COLUMN
 # =====================================================
 target = "bad"
 
+if target not in df.columns:
+    raise ValueError(f"Target column '{target}' not found in dataset.")
+
+# =====================================================
+# HANDLE MISSING VALUES SAFELY
+# =====================================================
+for col in df.columns:
+    df[col] = df[col].replace(["nan", "None", ""], np.nan)
+
+    # try converting to numeric first
+    converted = pd.to_numeric(df[col], errors="coerce")
+
+    # if enough numeric values exist, treat as numeric
+    if converted.notna().sum() > 0 and converted.notna().sum() >= len(df[col]) * 0.5:
+        df[col] = converted
+        df[col] = df[col].fillna(df[col].median())
+    else:
+        df[col] = df[col].astype(str)
+        df[col] = df[col].replace("nan", np.nan)
+        mode_val = df[col].mode()
+        fill_value = mode_val.iloc[0] if not mode_val.empty else "Unknown"
+        df[col] = df[col].fillna(fill_value)
+
+# =====================================================
+# ENCODE TARGET SAFELY
+# =====================================================
+if not pd.api.types.is_numeric_dtype(df[target]):
+    df[target] = df[target].astype(str).str.strip()
+    target_encoder = LabelEncoder()
+    df[target] = target_encoder.fit_transform(df[target])
+
 # =====================================================
 # ENCODE CATEGORICAL VARIABLES
 # =====================================================
 df_encoded = df.copy()
+
 for col in df_encoded.columns:
-    if df_encoded[col].dtype == "object":
-        df_encoded[col] = LabelEncoder().fit_transform(df_encoded[col].astype(str))
+    if col != target:
+        if not pd.api.types.is_numeric_dtype(df_encoded[col]):
+            df_encoded[col] = df_encoded[col].astype(str).str.strip()
+            encoder = LabelEncoder()
+            df_encoded[col] = encoder.fit_transform(df_encoded[col])
 
 # =====================================================
 # TRAIN TEST SPLIT
 # =====================================================
 X = df_encoded.drop(columns=[target])
 y = df_encoded[target]
+
+# extra safety
+X = X.apply(pd.to_numeric, errors="coerce")
+X = X.fillna(0)
+
+y = pd.to_numeric(y, errors="coerce").fillna(0).astype(int)
 
 X_train, X_test, y_train, y_test = train_test_split(
     X, y, test_size=0.3, random_state=42, stratify=y
@@ -89,13 +126,13 @@ X_train_scaled = scaler.fit_transform(X_train)
 X_test_scaled = scaler.transform(X_test)
 
 # =====================================================
-# MODELS (ALL 6)  ✅ removed use_label_encoder
+# MODELS
 # =====================================================
 models = {
     "Logistic Regression": LogisticRegression(max_iter=2000),
     "Naive Bayes": GaussianNB(),
     "SVM": SVC(probability=True, class_weight="balanced"),
-    "Decision Tree": DecisionTreeClassifier(),
+    "Decision Tree": DecisionTreeClassifier(random_state=42),
     "Random Forest": RandomForestClassifier(random_state=42),
     "XGBoost": XGBClassifier(eval_metric="logloss", random_state=42),
 }
@@ -117,27 +154,32 @@ for name, model in models.items():
     roc_auc = auc(fpr, tpr)
     roc_data[name] = (fpr, tpr, roc_auc)
 
-    rep = classification_report(y_test, preds, output_dict=True)
+    rep = classification_report(y_test, preds, output_dict=True, zero_division=0)
+
+    positive_class = "1" if "1" in rep else list(rep.keys())[0]
+
     comparison.append({
         "Model": name,
         "AUC": round(roc_auc, 3),
         "Accuracy": round(rep["accuracy"], 3),
-        "Precision": round(rep["1"]["precision"], 3),
-        "Recall": round(rep["1"]["recall"], 3),
-        "F1-score": round(rep["1"]["f1-score"], 3),
+        "Precision": round(rep[positive_class]["precision"], 3),
+        "Recall": round(rep[positive_class]["recall"], 3),
+        "F1-score": round(rep[positive_class]["f1-score"], 3),
     })
 
 comparison_df = pd.DataFrame(comparison).sort_values("AUC", ascending=False)
 
 # =====================================================
-# SENTIMENT + WORDCLOUD (FROM TXT)
+# SENTIMENT + WORDCLOUD
 # =====================================================
-with open(os.path.join(BASE_DIR, "NPS Survey.txt"), "r", encoding="utf-8") as f:
+with open(txt_path, "r", encoding="utf-8") as f:
     reviews = [line.strip() for line in f.readlines() if line.strip()]
 
 sia = SentimentIntensityAnalyzer()
 sentiment_df = pd.DataFrame({"Feedback": reviews})
-sentiment_df["Score"] = sentiment_df["Feedback"].apply(lambda x: sia.polarity_scores(x)["compound"])
+sentiment_df["Score"] = sentiment_df["Feedback"].apply(
+    lambda x: sia.polarity_scores(x)["compound"]
+)
 sentiment_df["Sentiment"] = sentiment_df["Score"].apply(
     lambda s: "Positive" if s >= 0.05 else ("Negative" if s <= -0.05 else "Neutral")
 )
@@ -166,11 +208,15 @@ def style_fig(fig, title=None):
         margin=dict(l=20, r=20, t=60, b=20),
         hovermode="x unified",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-        font=dict(family="Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial", size=13),
+        font=dict(
+            family="Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial",
+            size=13
+        ),
     )
     fig.update_xaxes(showgrid=True, gridwidth=1, zeroline=False)
     fig.update_yaxes(showgrid=True, gridwidth=1, zeroline=False)
     return fig
+
 
 def kpi_card(label, value, sub=None):
     return html.Div(
@@ -182,12 +228,12 @@ def kpi_card(label, value, sub=None):
         ],
     )
 
-# KPI values
+
+# =====================================================
+# KPI VALUES
+# =====================================================
 n_rows = len(df)
-try:
-    pos_rate = float(df[target].mean())
-except Exception:
-    pos_rate = float(df_encoded[target].mean())
+pos_rate = float(pd.to_numeric(df[target], errors="coerce").fillna(0).mean())
 
 best_model = comparison_df.iloc[0]["Model"]
 best_auc = float(comparison_df.iloc[0]["AUC"])
@@ -196,21 +242,27 @@ avg_auc = float(comparison_df["AUC"].mean())
 # =====================================================
 # DASH APP
 # =====================================================
-external_stylesheets = ["https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css"]
+external_stylesheets = [
+    "https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css"
+]
+
 app = dash.Dash(__name__, external_stylesheets=external_stylesheets)
+server = app.server
 app.title = "Bank Credit Scoring Dashboard"
 
 app.layout = html.Div(
     className="page",
     children=[
-        # HEADER
         html.Div(
             className="topbar",
             children=[
                 html.Div(
                     children=[
                         html.H1("Bank Credit Scoring Dashboard", className="title"),
-                        html.Div("EDA • Model ROC • Model comparison • Customer feedback sentiment", className="subtitle"),
+                        html.Div(
+                            "EDA • Model ROC • Model comparison • Customer feedback sentiment",
+                            className="subtitle",
+                        ),
                     ]
                 ),
                 html.Div(
@@ -220,7 +272,6 @@ app.layout = html.Div(
             ],
         ),
 
-        # KPI ROW
         html.Div(
             className="kpi-row",
             children=[
@@ -231,14 +282,12 @@ app.layout = html.Div(
             ],
         ),
 
-        # MAIN CARD (TABS)
         html.Div(
             className="card",
             children=[
                 dcc.Tabs(
                     className="dash-tabs",
                     children=[
-                        # TAB 1: EDA
                         dcc.Tab(
                             label="EDA",
                             children=[
@@ -266,7 +315,6 @@ app.layout = html.Div(
                             ],
                         ),
 
-                        # TAB 2: ROC
                         dcc.Tab(
                             label="MODELS (ROC)",
                             children=[
@@ -288,7 +336,6 @@ app.layout = html.Div(
                             ],
                         ),
 
-                        # TAB 3: COMPARISON
                         dcc.Tab(
                             label="MODEL COMPARISON",
                             children=[
@@ -308,7 +355,6 @@ app.layout = html.Div(
                                     ),
                                 ),
                                 html.Div(style={"height": "8px"}),
-
                                 html.Div(
                                     className="inner-card",
                                     children=[
@@ -341,7 +387,6 @@ app.layout = html.Div(
                             ],
                         ),
 
-                        # TAB 4: WORDCLOUD
                         dcc.Tab(
                             label="WORDCLOUD & SENTIMENT",
                             children=[
@@ -395,28 +440,49 @@ app.layout = html.Div(
 def update_eda(choice):
     if choice == "target":
         fig = px.histogram(df, x=target, title="Target Distribution (bad)")
-    elif choice in ["debtinc", "creddebt", "othdebt"]:
+    elif choice in ["debtinc", "creddebt", "othdebt"] and choice in df.columns:
         fig = px.box(df, x=target, y=choice, title=f"{choice} vs bad")
-    elif choice == "age":
+    elif choice == "age" and "age" in df.columns:
         fig = px.histogram(df, x="age", title="Age Distribution")
     else:
         fig = px.histogram(df, x=target, title="Target Distribution (bad)")
 
     return style_fig(fig, title=fig.layout.title.text)
 
+
 @app.callback(Output("roc-graph", "figure"), Input("model-choice", "value"))
 def update_roc(model_name):
     fpr, tpr, roc_auc = roc_data[model_name]
 
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=fpr, y=tpr, mode="lines", name=f"{model_name} (AUC = {roc_auc:.3f})"))
-    fig.add_trace(go.Scatter(x=[0, 1], y=[0, 1], mode="lines", name="Random", line=dict(dash="dash")))
+    fig.add_trace(
+        go.Scatter(
+            x=fpr,
+            y=tpr,
+            mode="lines",
+            name=f"{model_name} (AUC = {roc_auc:.3f})"
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=[0, 1],
+            y=[0, 1],
+            mode="lines",
+            name="Random",
+            line=dict(dash="dash")
+        )
+    )
 
-    fig.update_layout(title="ROC Curve", xaxis_title="False Positive Rate", yaxis_title="True Positive Rate")
+    fig.update_layout(
+        title="ROC Curve",
+        xaxis_title="False Positive Rate",
+        yaxis_title="True Positive Rate"
+    )
     return style_fig(fig, title="ROC Curve")
+
 
 # =====================================================
 # RUN
 # =====================================================
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(debug=False)
